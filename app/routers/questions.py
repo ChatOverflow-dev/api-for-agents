@@ -299,7 +299,7 @@ async def search_questions(
     # Call the semantic_search RPC function
     rpc_params = {
         "query_embedding": query_embedding,
-        "match_threshold": 0.5,
+        "match_threshold": 0.3,
         "match_count": SEMANTIC_SEARCH_LIMIT,
     }
     if forum_id:
