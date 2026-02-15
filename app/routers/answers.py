@@ -7,6 +7,7 @@ from app.models.answer import (
 )
 from app.models.question import SortOption, VoteRequest, VoteOption
 from app.utils.auth import get_current_user, get_optional_user
+from app.utils.embeddings import get_embedding
 import math
 
 router = APIRouter(tags=["answers"])
@@ -69,6 +70,13 @@ async def create_answer(
 
         # Note: answer_count on question, answer_count on user, and reputation
         # are all updated automatically by database triggers.
+
+        # Generate and store embedding
+        embedding = get_embedding(request.body)
+        if embedding is not None:
+            supabase.table("answers").update(
+                {"embedding": embedding}
+            ).eq("id", answer_data["id"]).execute()
 
         return AnswerPublic(
             id=answer_data["id"],

@@ -9,6 +9,7 @@ from app.models.question import (
     VoteOption,
 )
 from app.utils.auth import get_current_user, get_optional_user
+from app.utils.embeddings import get_embedding
 import math
 import re
 
@@ -73,6 +74,13 @@ async def create_question(
 
         # Note: question_count on forum, question_count on user, and reputation
         # are all updated automatically by database triggers.
+
+        # Generate and store embedding
+        embedding = get_embedding(request.title + "\n\n" + request.body)
+        if embedding is not None:
+            supabase.table("questions").update(
+                {"embedding": embedding}
+            ).eq("id", question_data["id"]).execute()
 
         return QuestionPublic(
             id=question_data["id"],
@@ -240,6 +248,120 @@ async def get_unanswered_questions(
     return [_format_question(q) for q in result.data]
 
 
+SEMANTIC_SEARCH_LIMIT = 200
+
+
+def _get_user_votes(user: dict | None, question_ids: list[str]) -> dict:
+    """Fetch user's votes for a list of question IDs."""
+    if not user or not question_ids:
+        return {}
+    votes_result = (
+        supabase.table("question_votes")
+        .select("question_id, vote_type")
+        .eq("user_id", user["id"])
+        .in_("question_id", question_ids)
+        .execute()
+    )
+    return {v["question_id"]: v["vote_type"] for v in votes_result.data}
+
+
+@router.get("/search", response_model=QuestionListResponse)
+async def search_questions(
+    q: str = Query(..., min_length=1, description="Semantic search query (searches question and answer content by meaning)"),
+    keywords: str | None = Query(None, description="Optional keyword filter on title and body (space-separated words, all must match)"),
+    forum_id: str | None = Query(None, description="Filter by forum ID"),
+    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
+    user: dict | None = Depends(get_optional_user),
+):
+    """
+    Semantic search for questions.
+
+    Finds questions whose meaning matches your query, ranked by relevance.
+    Searches both question content (title + body) and answer content,
+    returning the parent questions.
+
+    - **q** (required): Natural language search query.
+    - **keywords**: Optional keyword filter — each space-separated word must appear
+      in the question title or body. Use to narrow semantic results.
+    - **forum_id**: Filter to a specific forum.
+    - Returns 20 questions per page, sorted by relevance.
+    - If authenticated, includes user_vote for each question.
+
+    Public endpoint - authentication optional.
+    """
+    query_embedding = get_embedding(q)
+    if query_embedding is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Semantic search is not available (embedding model not configured)",
+        )
+
+    # Call the semantic_search RPC function
+    rpc_params = {
+        "query_embedding": query_embedding,
+        "match_threshold": 0.3,
+        "match_count": SEMANTIC_SEARCH_LIMIT,
+    }
+    if forum_id:
+        rpc_params["p_forum_id"] = forum_id
+
+    rpc_result = supabase.rpc("semantic_search", rpc_params).execute()
+    matched = rpc_result.data or []
+
+    if not matched:
+        return QuestionListResponse(questions=[], page=1, total_pages=1)
+
+    # Ordered IDs by similarity (RPC returns them sorted)
+    ordered_ids = [m["question_id"] for m in matched]
+
+    # Apply keyword filter if provided
+    if keywords:
+        keyword_words = [_sanitize_search_word(w) for w in keywords.split() if w.strip()]
+        if keyword_words:
+            keyword_query = supabase.table("questions").select("id").in_("id", ordered_ids)
+            for word in keyword_words:
+                keyword_query = keyword_query.or_(f"title.ilike.%{word}%,body.ilike.%{word}%")
+            keyword_result = keyword_query.execute()
+            matching_keyword_ids = {r["id"] for r in keyword_result.data}
+            ordered_ids = [qid for qid in ordered_ids if qid in matching_keyword_ids]
+
+    # Paginate over the ordered results
+    total = len(ordered_ids)
+    total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 1
+
+    if page > total_pages:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Page {page} not found. Total pages: {total_pages}",
+        )
+
+    offset = (page - 1) * PAGE_SIZE
+    page_ids = ordered_ids[offset : offset + PAGE_SIZE]
+
+    if not page_ids:
+        return QuestionListResponse(questions=[], page=page, total_pages=total_pages)
+
+    # Fetch full question data for this page
+    result = (
+        supabase.table("questions")
+        .select("*, users!questions_author_id_fkey(username), forums(name)")
+        .in_("id", page_ids)
+        .execute()
+    )
+
+    # Re-order by similarity (DB fetch doesn't preserve in-list order)
+    questions_by_id = {q_data["id"]: q_data for q_data in result.data}
+    ordered_questions = [questions_by_id[qid] for qid in page_ids if qid in questions_by_id]
+
+    user_votes = _get_user_votes(user, page_ids)
+
+    return QuestionListResponse(
+        questions=[_format_question(q_data, user_vote=user_votes.get(q_data["id"])) for q_data in ordered_questions],
+        page=page,
+        total_pages=total_pages,
+    )
+
+
 @router.get("", response_model=QuestionListResponse)
 async def list_questions(
     forum_id: str | None = Query(None, description="Filter by forum ID"),
@@ -306,17 +428,7 @@ async def list_questions(
     result = query.execute()
 
     # Get user votes if authenticated
-    user_votes = {}
-    if user and result.data:
-        question_ids = [q["id"] for q in result.data]
-        votes_result = (
-            supabase.table("question_votes")
-            .select("question_id, vote_type")
-            .eq("user_id", user["id"])
-            .in_("question_id", question_ids)
-            .execute()
-        )
-        user_votes = {v["question_id"]: v["vote_type"] for v in votes_result.data}
+    user_votes = _get_user_votes(user, [q["id"] for q in result.data])
 
     return QuestionListResponse(
         questions=[_format_question(q, user_vote=user_votes.get(q["id"])) for q in result.data],
