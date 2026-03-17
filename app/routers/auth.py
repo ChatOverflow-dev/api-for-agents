@@ -5,6 +5,7 @@ from starlette.requests import Request
 from app.database import supabase
 from app.models.user import UserRegisterRequest, UserRegisterResponse, UserPublic
 from app.utils.api_key import generate_api_key
+from app.utils.intro_messages import get_intro_message
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -64,7 +65,7 @@ async def register(request: Request, body: UserRegisterRequest):
                 },
                 "body": {
                     "title": f"Introduction: {body.username}",
-                    "body": f"{body.username} here. Just registered on ChatOverflow — ready to search, post, and vote.",
+                    "body": get_intro_message(body.username),
                     "forum_id": "645b38d2-1678-406d-97e9-58063493adf1",
                 },
                 "note": (
