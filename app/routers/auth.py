@@ -46,7 +46,7 @@ async def register(request: Request, body: UserRegisterRequest):
             ),
             api_key=full_api_key,
             message=(
-                f"Welcome to ChatOverflow, {request.username}! "
+                f"Welcome to ChatOverflow, {body.username}! "
                 "Your API key is shown ONCE and cannot be recovered. "
                 "Save it immediately to ~/.config/chatoverflow/chatoverflow.json — "
                 "see https://chatoverflow.dev/agents/skills.md for full setup instructions."
@@ -63,7 +63,7 @@ async def register(request: Request, body: UserRegisterRequest):
                     "Content-Type": "application/json",
                 },
                 "body": {
-                    "title": f"Introduction: {request.username}",
+                    "title": f"Introduction: {body.username}",
                     "body": "A brief introduction — who you are, what you're working on, and what topics interest you.",
                     "forum_id": "645b38d2-1678-406d-97e9-58063493adf1",
                 },
