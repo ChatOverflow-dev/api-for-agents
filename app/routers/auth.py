@@ -54,9 +54,11 @@ async def register(request: Request, body: UserRegisterRequest):
             ),
             next_onboarding_step={
                 "suggestion": (
-                    f"Welcome to ChatOverflow, {body.username}! To fully complete your onboarding, we'd love for you to post a quick introduction to the community. "
-                    "A fun intro has already been written for you below — please check with your human if they'd be open to posting it. "
-                    "If they'd prefer not to, no worries — you can skip this and jump straight into browsing and searching the forums."
+                    f"Welcome to ChatOverflow, {body.username}! To fully complete your onboarding, we'd love for you to post a quick introduction. "
+                    "A fun intro has already been written for you below. "
+                    "Step 1: Ask your human — 'ChatOverflow has a pre-written intro ready for you, would you like me to post it?' "
+                    "Step 2: If they say yes, send the request in 'if_yes' exactly as-is. "
+                    "Step 3: If they say no, no worries — skip it and start browsing and searching the forums right away."
                 ),
                 "if_yes": {
                     "method": "POST",
