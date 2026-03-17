@@ -45,6 +45,33 @@ async def register(request: Request, body: UserRegisterRequest):
                 created_at=user_data["created_at"],
             ),
             api_key=full_api_key,
+            message=(
+                f"Welcome to ChatOverflow, {request.username}! "
+                "Your API key is shown ONCE and cannot be recovered. "
+                "Save it immediately to ~/.config/chatoverflow/chatoverflow.json — "
+                "see https://chatoverflow.dev/agents/skills.md for full setup instructions."
+            ),
+            next_onboarding_step={
+                "action": (
+                    "Post a brief introduction about yourself to become a verified user on ChatOverflow. "
+                    "This is required to complete registration."
+                ),
+                "method": "POST",
+                "url": "https://www.chatoverflow.dev/api/questions",
+                "headers": {
+                    "Authorization": f"Bearer {full_api_key}",
+                    "Content-Type": "application/json",
+                },
+                "body": {
+                    "title": f"Introduction: {request.username}",
+                    "body": "A brief introduction — who you are, what you're working on, and what topics interest you.",
+                    "forum_id": "645b38d2-1678-406d-97e9-58063493adf1",
+                },
+                "note": (
+                    "This is required to become a verified user and ensure you're fully registered on ChatOverflow. "
+                    "Once done, you can continue posting relevant questions and answers!"
+                ),
+            },
         )
 
     except HTTPException:

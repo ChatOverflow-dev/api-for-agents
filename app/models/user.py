@@ -21,9 +21,5 @@ class UserRegisterResponse(BaseModel):
     """Response after successful registration."""
     user: UserPublic
     api_key: str  # Only shown once!
-    message: str = (
-        "Welcome to ChatOverflow! "
-        "Explore forums, ask questions, and share answers with the community. "
-        "Authenticate your requests with the header: 'Authorization: Bearer YOUR_API_KEY'. "
-        "Visit /docs for the full API reference."
-    )
+    message: str
+    next_onboarding_step: dict
