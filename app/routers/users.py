@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from app.database import supabase
 from app.models.user import UserPublic
 from app.models.question import QuestionPublic, QuestionListResponse, SortOption
@@ -11,6 +12,17 @@ router = APIRouter(prefix="/users", tags=["users"])
 PAGE_SIZE = 20
 
 USER_PUBLIC_FIELDS = "id, username, question_count, answer_count, reputation, created_at"
+
+
+class UserUsageStats(BaseModel):
+    id: str
+    username: str
+    activity_score: int
+    feedback_score: int
+    contribution_score: int
+    question_count: int
+    answer_count: int
+    created_at: str
 
 
 def _format_user(user: dict) -> UserPublic:
@@ -53,6 +65,101 @@ async def get_top_users(
     )
 
     return [_format_user(u) for u in result.data]
+
+
+@router.get("/usage", response_model=list[UserUsageStats])
+async def get_usage_stats(
+    limit: int = Query(50, ge=1, le=100, description="Number of users to return (max 100)"),
+):
+    """
+    Get usage statistics for top users.
+
+    Returns three scores per user:
+    - activity_score: total questions + answers posted
+    - feedback_score: sum of (upvotes - downvotes) on all questions and answers they authored
+    - contribution_score: total votes (up + down) they have cast on others' content
+
+    Public endpoint - no authentication required.
+    """
+    # Get top users by activity (question_count + answer_count)
+    users_result = (
+        supabase.table("users")
+        .select("id, username, question_count, answer_count, created_at")
+        .order("reputation", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    user_list = users_result.data or []
+
+    if not user_list:
+        return []
+
+    user_ids = [u["id"] for u in user_list]
+
+    # Feedback score: sum of score on all questions authored by each user
+    q_scores: dict[str, int] = {}
+    for uid in user_ids:
+        result = (
+            supabase.table("questions")
+            .select("score")
+            .eq("author_id", uid)
+            .execute()
+        )
+        q_scores[uid] = sum(row["score"] for row in (result.data or []))
+
+    # Feedback score: sum of score on all answers authored by each user
+    a_scores: dict[str, int] = {}
+    for uid in user_ids:
+        result = (
+            supabase.table("answers")
+            .select("score")
+            .eq("author_id", uid)
+            .execute()
+        )
+        a_scores[uid] = sum(row["score"] for row in (result.data or []))
+
+    # Contribution score: count of votes cast by each user
+    qv_counts: dict[str, int] = {}
+    for uid in user_ids:
+        result = (
+            supabase.table("question_votes")
+            .select("user_id", count="exact")
+            .eq("user_id", uid)
+            .execute()
+        )
+        qv_counts[uid] = result.count or 0
+
+    av_counts: dict[str, int] = {}
+    for uid in user_ids:
+        result = (
+            supabase.table("answer_votes")
+            .select("user_id", count="exact")
+            .eq("user_id", uid)
+            .execute()
+        )
+        av_counts[uid] = result.count or 0
+
+    # Build response
+    stats = []
+    for u in user_list:
+        uid = u["id"]
+        activity = u["question_count"] + u["answer_count"]
+        feedback = q_scores.get(uid, 0) + a_scores.get(uid, 0)
+        contribution = qv_counts.get(uid, 0) + av_counts.get(uid, 0)
+        stats.append(UserUsageStats(
+            id=uid,
+            username=u["username"],
+            activity_score=activity,
+            feedback_score=feedback,
+            contribution_score=contribution,
+            question_count=u["question_count"],
+            answer_count=u["answer_count"],
+            created_at=u["created_at"],
+        ))
+
+    # Sort by activity_score descending by default
+    stats.sort(key=lambda s: s.activity_score, reverse=True)
+    return stats
 
 
 @router.get("/username/{username}", response_model=UserPublic)
