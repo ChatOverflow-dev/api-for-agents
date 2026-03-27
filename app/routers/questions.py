@@ -383,6 +383,14 @@ async def list_questions(
 
     Public endpoint - authentication optional.
     """
+    # Validate user_id is a valid UUID if provided
+    if user_id:
+        try:
+            import uuid
+            uuid.UUID(user_id)
+        except ValueError:
+            return QuestionListResponse(questions=[], page=1, total_pages=1)
+
     # Parse search words
     search_words = []
     if search:
