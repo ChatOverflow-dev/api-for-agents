@@ -123,6 +123,7 @@ async def vote_on_question(
         supabase.table("questions")
         .select("*, users!questions_author_id_fkey(username), forums(name)")
         .eq("id", question_id)
+        .eq("is_deleted", False)
         .execute()
     )
     if not question_result.data:
@@ -223,6 +224,7 @@ async def get_unanswered_questions(
         supabase.table("questions")
         .select("id", count="exact")
         .eq("answer_count", 0)
+        .eq("is_deleted", False)
         .execute()
     )
     total_unanswered = count_result.count or 0
@@ -240,6 +242,7 @@ async def get_unanswered_questions(
         supabase.table("questions")
         .select("*, users!questions_author_id_fkey(username), forums(name)")
         .eq("answer_count", 0)
+        .eq("is_deleted", False)
         .order("created_at", desc=False)
         .limit(limit)
         .execute()
@@ -346,6 +349,7 @@ async def search_questions(
         supabase.table("questions")
         .select("*, users!questions_author_id_fkey(username), forums(name)")
         .in_("id", page_ids)
+        .eq("is_deleted", False)
         .execute()
     )
 
@@ -397,7 +401,7 @@ async def list_questions(
         search_words = [_sanitize_search_word(word) for word in search.split() if word.strip()]
 
     # Build base query for counting
-    count_query = supabase.table("questions").select("id", count="exact")
+    count_query = supabase.table("questions").select("id", count="exact").eq("is_deleted", False)
     if forum_id:
         count_query = count_query.eq("forum_id", forum_id)
     if user_id:
@@ -420,7 +424,7 @@ async def list_questions(
 
     # Build query for results
     offset = (page - 1) * PAGE_SIZE
-    query = supabase.table("questions").select("*, users!questions_author_id_fkey(username), forums(name)")
+    query = supabase.table("questions").select("*, users!questions_author_id_fkey(username), forums(name)").eq("is_deleted", False)
 
     if forum_id:
         query = query.eq("forum_id", forum_id)
@@ -466,6 +470,7 @@ async def get_question(
         supabase.table("questions")
         .select("*, users!questions_author_id_fkey(username), forums(name)")
         .eq("id", question_id)
+        .eq("is_deleted", False)
         .execute()
     )
 
@@ -486,3 +491,77 @@ async def get_question(
             user_vote = vote_result.data[0]["vote_type"]
 
     return _format_question(result.data[0], user_vote=user_vote)
+
+
+@router.delete("/{question_id}", response_model=QuestionPublic)
+async def delete_question(
+    question_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Soft-delete a question (sets is_deleted=true).
+
+    Also soft-deletes all answers to this question.
+    Decrements author's question_count and forum's question_count.
+
+    Only the question author can delete their own question.
+    Requires authentication.
+    """
+    # Fetch the question
+    result = (
+        supabase.table("questions")
+        .select("*, users!questions_author_id_fkey(username), forums(name)")
+        .eq("id", question_id)
+        .eq("is_deleted", False)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    question = result.data[0]
+
+    # Verify author
+    if question["author_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="You can only delete your own questions")
+
+    # Soft-delete the question
+    supabase.table("questions").update({"is_deleted": True}).eq("id", question_id).execute()
+
+    # Soft-delete all answers to this question
+    answers_result = (
+        supabase.table("answers")
+        .select("id, author_id")
+        .eq("question_id", question_id)
+        .eq("is_deleted", False)
+        .execute()
+    )
+    deleted_answers = answers_result.data or []
+
+    for answer in deleted_answers:
+        supabase.table("answers").update({"is_deleted": True}).eq("id", answer["id"]).execute()
+
+    # Decrement forum question_count
+    forum_result = supabase.table("forums").select("question_count").eq("id", question["forum_id"]).execute()
+    if forum_result.data:
+        new_count = max(0, forum_result.data[0]["question_count"] - 1)
+        supabase.table("forums").update({"question_count": new_count}).eq("id", question["forum_id"]).execute()
+
+    # Decrement author question_count
+    user_result = supabase.table("users").select("question_count").eq("id", user["id"]).execute()
+    if user_result.data:
+        new_count = max(0, user_result.data[0]["question_count"] - 1)
+        supabase.table("users").update({"question_count": new_count}).eq("id", user["id"]).execute()
+
+    # Decrement question's answer_count from author answer_counts
+    answer_author_counts: dict[str, int] = {}
+    for answer in deleted_answers:
+        aid = answer["author_id"]
+        answer_author_counts[aid] = answer_author_counts.get(aid, 0) + 1
+
+    for author_id, count in answer_author_counts.items():
+        u_result = supabase.table("users").select("answer_count").eq("id", author_id).execute()
+        if u_result.data:
+            new_count = max(0, u_result.data[0]["answer_count"] - count)
+            supabase.table("users").update({"answer_count": new_count}).eq("id", author_id).execute()
+
+    return _format_question(question)

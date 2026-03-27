@@ -141,7 +141,7 @@ async def get_usage_stats(
     user_ids = [u["id"] for u in user_list]
 
     # 3. Batch fetch question scores (with optional time filter)
-    q_query = supabase.table("questions").select("author_id, score").in_("author_id", user_ids)
+    q_query = supabase.table("questions").select("author_id, score").in_("author_id", user_ids).eq("is_deleted", False)
     if cutoff:
         q_query = q_query.gte("created_at", cutoff)
     q_result = q_query.execute()
@@ -153,7 +153,7 @@ async def get_usage_stats(
         q_counts[uid] = q_counts.get(uid, 0) + 1
 
     # 4. Batch fetch answer scores (with optional time filter)
-    a_query = supabase.table("answers").select("author_id, score").in_("author_id", user_ids)
+    a_query = supabase.table("answers").select("author_id, score").in_("author_id", user_ids).eq("is_deleted", False)
     if cutoff:
         a_query = a_query.gte("created_at", cutoff)
     a_result = a_query.execute()
@@ -228,6 +228,7 @@ async def get_user_activity(user_id: str):
         supabase.table("questions")
         .select("created_at")
         .eq("author_id", user_id)
+        .eq("is_deleted", False)
         .gte("created_at", cutoff)
         .execute()
     )
@@ -237,6 +238,7 @@ async def get_user_activity(user_id: str):
         supabase.table("answers")
         .select("created_at")
         .eq("author_id", user_id)
+        .eq("is_deleted", False)
         .gte("created_at", cutoff)
         .execute()
     )
@@ -317,6 +319,7 @@ async def get_user_questions(
         supabase.table("questions")
         .select("id", count="exact")
         .eq("author_id", user_id)
+        .eq("is_deleted", False)
         .execute()
     )
     total = count_result.count or 0
@@ -334,6 +337,7 @@ async def get_user_questions(
         supabase.table("questions")
         .select("*, users!questions_author_id_fkey(username), forums(name)")
         .eq("author_id", user_id)
+        .eq("is_deleted", False)
     )
 
     if sort == SortOption.top:
@@ -392,6 +396,7 @@ async def get_user_answers(
         supabase.table("answers")
         .select("id", count="exact")
         .eq("author_id", user_id)
+        .eq("is_deleted", False)
         .execute()
     )
     total = count_result.count or 0
@@ -409,6 +414,7 @@ async def get_user_answers(
         supabase.table("answers")
         .select("*, users!answers_author_id_fkey(username)")
         .eq("author_id", user_id)
+        .eq("is_deleted", False)
     )
 
     if sort == SortOption.top:

@@ -42,8 +42,8 @@ async def get_stats():
     Public endpoint - no authentication required.
     """
     users_count = supabase.table("users").select("id", count="exact").execute().count or 0
-    questions_count = supabase.table("questions").select("id", count="exact").execute().count or 0
-    answers_count = supabase.table("answers").select("id", count="exact").execute().count or 0
+    questions_count = supabase.table("questions").select("id", count="exact").eq("is_deleted", False).execute().count or 0
+    answers_count = supabase.table("answers").select("id", count="exact").eq("is_deleted", False).execute().count or 0
 
     return {
         "total_users": users_count,
@@ -61,8 +61,8 @@ async def get_usage_stats():
 
     Public endpoint - no authentication required.
     """
-    questions_count = supabase.table("questions").select("id", count="exact").execute().count or 0
-    answers_count = supabase.table("answers").select("id", count="exact").execute().count or 0
+    questions_count = supabase.table("questions").select("id", count="exact").eq("is_deleted", False).execute().count or 0
+    answers_count = supabase.table("answers").select("id", count="exact").eq("is_deleted", False).execute().count or 0
 
     qv_count = supabase.table("question_votes").select("user_id", count="exact").execute().count or 0
     av_count = supabase.table("answer_votes").select("user_id", count="exact").execute().count or 0
@@ -70,8 +70,8 @@ async def get_usage_stats():
     cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
     # Users who posted a question or answer in last 24h
-    recent_q = supabase.table("questions").select("author_id").gte("created_at", cutoff_24h).execute()
-    recent_a = supabase.table("answers").select("author_id").gte("created_at", cutoff_24h).execute()
+    recent_q = supabase.table("questions").select("author_id").eq("is_deleted", False).gte("created_at", cutoff_24h).execute()
+    recent_a = supabase.table("answers").select("author_id").eq("is_deleted", False).gte("created_at", cutoff_24h).execute()
     active_ids = set()
     for row in (recent_q.data or []):
         active_ids.add(row["author_id"])
