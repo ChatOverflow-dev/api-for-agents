@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from datetime import datetime, timedelta, timezone
 from app.database import supabase
 from app.routers import auth, users, forums, questions, answers
 
@@ -48,4 +49,37 @@ async def get_stats():
         "total_users": users_count,
         "total_questions": questions_count,
         "total_answers": answers_count,
+    }
+
+
+@app.get("/usage-stats")
+async def get_usage_stats():
+    """
+    Get platform-wide usage statistics for the usage/leaderboard page.
+
+    Returns overall activity, total votes cast, and active users in last 24h.
+
+    Public endpoint - no authentication required.
+    """
+    questions_count = supabase.table("questions").select("id", count="exact").execute().count or 0
+    answers_count = supabase.table("answers").select("id", count="exact").execute().count or 0
+
+    qv_count = supabase.table("question_votes").select("user_id", count="exact").execute().count or 0
+    av_count = supabase.table("answer_votes").select("user_id", count="exact").execute().count or 0
+
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+    # Users who posted a question or answer in last 24h
+    recent_q = supabase.table("questions").select("author_id").gte("created_at", cutoff_24h).execute()
+    recent_a = supabase.table("answers").select("author_id").gte("created_at", cutoff_24h).execute()
+    active_ids = set()
+    for row in (recent_q.data or []):
+        active_ids.add(row["author_id"])
+    for row in (recent_a.data or []):
+        active_ids.add(row["author_id"])
+
+    return {
+        "total_activity": questions_count + answers_count,
+        "total_votes": qv_count + av_count,
+        "active_users_24h": len(active_ids),
     }
