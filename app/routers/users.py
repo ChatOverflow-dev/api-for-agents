@@ -33,6 +33,13 @@ class UserUsageStats(BaseModel):
     created_at: str
 
 
+class UsageListResponse(BaseModel):
+    users: list[UserUsageStats]
+    page: int
+    total_pages: int
+    total_users: int
+
+
 def _format_user(user: dict) -> UserPublic:
     """Helper to format user data."""
     return UserPublic(
@@ -75,13 +82,16 @@ async def get_top_users(
     return [_format_user(u) for u in result.data]
 
 
-@router.get("/usage", response_model=list[UserUsageStats])
+USAGE_PAGE_SIZE = 20
+
+
+@router.get("/usage", response_model=UsageListResponse)
 async def get_usage_stats(
-    limit: int = Query(50, ge=1, le=100, description="Number of users to return (max 100)"),
+    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
     period: UsagePeriod = Query(UsagePeriod.all, description="Time period: '24h', '30d', or 'all'"),
 ):
     """
-    Get usage statistics for top users.
+    Get usage statistics for all users, paginated (20 per page).
 
     Returns three scores per user:
     - activity_score: total questions + answers posted
@@ -99,22 +109,38 @@ async def get_usage_stats(
     elif period == UsagePeriod.month:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
 
-    # 1. Get top users
+    # 1. Get total user count
+    total_count = (
+        supabase.table("users")
+        .select("id", count="exact")
+        .execute()
+    ).count or 0
+
+    total_pages = math.ceil(total_count / USAGE_PAGE_SIZE) if total_count > 0 else 1
+
+    if page > total_pages:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Page {page} not found. Total pages: {total_pages}"
+        )
+
+    # 2. Get paginated users
+    offset = (page - 1) * USAGE_PAGE_SIZE
     users_result = (
         supabase.table("users")
         .select("id, username, question_count, answer_count, created_at")
         .order("reputation", desc=True)
-        .limit(limit)
+        .range(offset, offset + USAGE_PAGE_SIZE - 1)
         .execute()
     )
     user_list = users_result.data or []
 
     if not user_list:
-        return []
+        return UsageListResponse(users=[], page=page, total_pages=total_pages, total_users=total_count)
 
     user_ids = [u["id"] for u in user_list]
 
-    # 2. Batch fetch question scores (with optional time filter)
+    # 3. Batch fetch question scores (with optional time filter)
     q_query = supabase.table("questions").select("author_id, score").in_("author_id", user_ids)
     if cutoff:
         q_query = q_query.gte("created_at", cutoff)
@@ -126,7 +152,7 @@ async def get_usage_stats(
         q_scores[uid] = q_scores.get(uid, 0) + row["score"]
         q_counts[uid] = q_counts.get(uid, 0) + 1
 
-    # 3. Batch fetch answer scores (with optional time filter)
+    # 4. Batch fetch answer scores (with optional time filter)
     a_query = supabase.table("answers").select("author_id, score").in_("author_id", user_ids)
     if cutoff:
         a_query = a_query.gte("created_at", cutoff)
@@ -138,7 +164,7 @@ async def get_usage_stats(
         a_scores[uid] = a_scores.get(uid, 0) + row["score"]
         a_counts[uid] = a_counts.get(uid, 0) + 1
 
-    # 4. Batch fetch question votes cast (with optional time filter)
+    # 5. Batch fetch question votes cast (with optional time filter)
     qv_query = supabase.table("question_votes").select("user_id").in_("user_id", user_ids)
     if cutoff:
         qv_query = qv_query.gte("created_at", cutoff)
@@ -147,7 +173,7 @@ async def get_usage_stats(
     for row in (qv_result.data or []):
         qv_counts[row["user_id"]] = qv_counts.get(row["user_id"], 0) + 1
 
-    # 5. Batch fetch answer votes cast (with optional time filter)
+    # 6. Batch fetch answer votes cast (with optional time filter)
     av_query = supabase.table("answer_votes").select("user_id").in_("user_id", user_ids)
     if cutoff:
         av_query = av_query.gte("created_at", cutoff)
@@ -178,7 +204,7 @@ async def get_usage_stats(
         ))
 
     stats.sort(key=lambda s: s.activity_score, reverse=True)
-    return stats
+    return UsageListResponse(users=stats, page=page, total_pages=total_pages, total_users=total_count)
 
 
 class DailyActivity(BaseModel):
