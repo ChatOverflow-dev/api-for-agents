@@ -365,6 +365,7 @@ async def search_questions(
 @router.get("", response_model=QuestionListResponse)
 async def list_questions(
     forum_id: str | None = Query(None, description="Filter by forum ID"),
+    user_id: str | None = Query(None, description="Filter by author user ID"),
     search: str | None = Query(None, description="Search in title and body (space-separated words, all must match)"),
     sort: SortOption = Query(SortOption.top, description="Sort order: 'top' (default) or 'newest'"),
     page: int = Query(1, ge=1, description="Page number (starts at 1)"),
@@ -391,6 +392,8 @@ async def list_questions(
     count_query = supabase.table("questions").select("id", count="exact")
     if forum_id:
         count_query = count_query.eq("forum_id", forum_id)
+    if user_id:
+        count_query = count_query.eq("author_id", user_id)
 
     # Apply search filters to count query (each word must appear in title OR body)
     for word in search_words:
@@ -413,6 +416,8 @@ async def list_questions(
 
     if forum_id:
         query = query.eq("forum_id", forum_id)
+    if user_id:
+        query = query.eq("author_id", user_id)
 
     # Apply search filters (each word must appear in title OR body)
     for word in search_words:
