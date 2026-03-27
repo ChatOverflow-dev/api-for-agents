@@ -81,7 +81,7 @@ async def get_usage_stats(
 
     Public endpoint - no authentication required.
     """
-    # Get top users by activity (question_count + answer_count)
+    # 1. Get top users
     users_result = (
         supabase.table("users")
         .select("id, username, question_count, answer_count, created_at")
@@ -96,48 +96,49 @@ async def get_usage_stats(
 
     user_ids = [u["id"] for u in user_list]
 
-    # Feedback score: sum of score on all questions authored by each user
+    # 2. Batch fetch all question scores for these users (single query)
+    q_result = (
+        supabase.table("questions")
+        .select("author_id, score")
+        .in_("author_id", user_ids)
+        .execute()
+    )
     q_scores: dict[str, int] = {}
-    for uid in user_ids:
-        result = (
-            supabase.table("questions")
-            .select("score")
-            .eq("author_id", uid)
-            .execute()
-        )
-        q_scores[uid] = sum(row["score"] for row in (result.data or []))
+    for row in (q_result.data or []):
+        q_scores[row["author_id"]] = q_scores.get(row["author_id"], 0) + row["score"]
 
-    # Feedback score: sum of score on all answers authored by each user
+    # 3. Batch fetch all answer scores for these users (single query)
+    a_result = (
+        supabase.table("answers")
+        .select("author_id, score")
+        .in_("author_id", user_ids)
+        .execute()
+    )
     a_scores: dict[str, int] = {}
-    for uid in user_ids:
-        result = (
-            supabase.table("answers")
-            .select("score")
-            .eq("author_id", uid)
-            .execute()
-        )
-        a_scores[uid] = sum(row["score"] for row in (result.data or []))
+    for row in (a_result.data or []):
+        a_scores[row["author_id"]] = a_scores.get(row["author_id"], 0) + row["score"]
 
-    # Contribution score: count of votes cast by each user
+    # 4. Batch fetch all question votes cast by these users (single query)
+    qv_result = (
+        supabase.table("question_votes")
+        .select("user_id")
+        .in_("user_id", user_ids)
+        .execute()
+    )
     qv_counts: dict[str, int] = {}
-    for uid in user_ids:
-        result = (
-            supabase.table("question_votes")
-            .select("user_id", count="exact")
-            .eq("user_id", uid)
-            .execute()
-        )
-        qv_counts[uid] = result.count or 0
+    for row in (qv_result.data or []):
+        qv_counts[row["user_id"]] = qv_counts.get(row["user_id"], 0) + 1
 
+    # 5. Batch fetch all answer votes cast by these users (single query)
+    av_result = (
+        supabase.table("answer_votes")
+        .select("user_id")
+        .in_("user_id", user_ids)
+        .execute()
+    )
     av_counts: dict[str, int] = {}
-    for uid in user_ids:
-        result = (
-            supabase.table("answer_votes")
-            .select("user_id", count="exact")
-            .eq("user_id", uid)
-            .execute()
-        )
-        av_counts[uid] = result.count or 0
+    for row in (av_result.data or []):
+        av_counts[row["user_id"]] = av_counts.get(row["user_id"], 0) + 1
 
     # Build response
     stats = []
@@ -157,7 +158,6 @@ async def get_usage_stats(
             created_at=u["created_at"],
         ))
 
-    # Sort by activity_score descending by default
     stats.sort(key=lambda s: s.activity_score, reverse=True)
     return stats
 
