@@ -5,6 +5,8 @@ from app.models.user import UserPublic
 from app.models.question import QuestionPublic, QuestionListResponse, SortOption
 from app.models.answer import AnswerPublic, AnswerListResponse
 from app.utils.auth import get_current_user
+from datetime import datetime, timedelta, timezone
+from enum import Enum
 import math
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -12,6 +14,12 @@ router = APIRouter(prefix="/users", tags=["users"])
 PAGE_SIZE = 20
 
 USER_PUBLIC_FIELDS = "id, username, question_count, answer_count, reputation, created_at"
+
+
+class UsagePeriod(str, Enum):
+    day = "24h"
+    month = "30d"
+    all = "all"
 
 
 class UserUsageStats(BaseModel):
@@ -70,6 +78,7 @@ async def get_top_users(
 @router.get("/usage", response_model=list[UserUsageStats])
 async def get_usage_stats(
     limit: int = Query(50, ge=1, le=100, description="Number of users to return (max 100)"),
+    period: UsagePeriod = Query(UsagePeriod.all, description="Time period: '24h', '30d', or 'all'"),
 ):
     """
     Get usage statistics for top users.
@@ -79,8 +88,17 @@ async def get_usage_stats(
     - feedback_score: sum of (upvotes - downvotes) on all questions and answers they authored
     - contribution_score: total votes (up + down) they have cast on others' content
 
+    Supports time filtering via `period` param: '24h', '30d', or 'all' (default).
+
     Public endpoint - no authentication required.
     """
+    # Compute cutoff timestamp
+    cutoff: str | None = None
+    if period == UsagePeriod.day:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    elif period == UsagePeriod.month:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
     # 1. Get top users
     users_result = (
         supabase.table("users")
@@ -96,46 +114,44 @@ async def get_usage_stats(
 
     user_ids = [u["id"] for u in user_list]
 
-    # 2. Batch fetch all question scores for these users (single query)
-    q_result = (
-        supabase.table("questions")
-        .select("author_id, score")
-        .in_("author_id", user_ids)
-        .execute()
-    )
+    # 2. Batch fetch question scores (with optional time filter)
+    q_query = supabase.table("questions").select("author_id, score").in_("author_id", user_ids)
+    if cutoff:
+        q_query = q_query.gte("created_at", cutoff)
+    q_result = q_query.execute()
     q_scores: dict[str, int] = {}
+    q_counts: dict[str, int] = {}
     for row in (q_result.data or []):
-        q_scores[row["author_id"]] = q_scores.get(row["author_id"], 0) + row["score"]
+        uid = row["author_id"]
+        q_scores[uid] = q_scores.get(uid, 0) + row["score"]
+        q_counts[uid] = q_counts.get(uid, 0) + 1
 
-    # 3. Batch fetch all answer scores for these users (single query)
-    a_result = (
-        supabase.table("answers")
-        .select("author_id, score")
-        .in_("author_id", user_ids)
-        .execute()
-    )
+    # 3. Batch fetch answer scores (with optional time filter)
+    a_query = supabase.table("answers").select("author_id, score").in_("author_id", user_ids)
+    if cutoff:
+        a_query = a_query.gte("created_at", cutoff)
+    a_result = a_query.execute()
     a_scores: dict[str, int] = {}
+    a_counts: dict[str, int] = {}
     for row in (a_result.data or []):
-        a_scores[row["author_id"]] = a_scores.get(row["author_id"], 0) + row["score"]
+        uid = row["author_id"]
+        a_scores[uid] = a_scores.get(uid, 0) + row["score"]
+        a_counts[uid] = a_counts.get(uid, 0) + 1
 
-    # 4. Batch fetch all question votes cast by these users (single query)
-    qv_result = (
-        supabase.table("question_votes")
-        .select("user_id")
-        .in_("user_id", user_ids)
-        .execute()
-    )
+    # 4. Batch fetch question votes cast (with optional time filter)
+    qv_query = supabase.table("question_votes").select("user_id").in_("user_id", user_ids)
+    if cutoff:
+        qv_query = qv_query.gte("created_at", cutoff)
+    qv_result = qv_query.execute()
     qv_counts: dict[str, int] = {}
     for row in (qv_result.data or []):
         qv_counts[row["user_id"]] = qv_counts.get(row["user_id"], 0) + 1
 
-    # 5. Batch fetch all answer votes cast by these users (single query)
-    av_result = (
-        supabase.table("answer_votes")
-        .select("user_id")
-        .in_("user_id", user_ids)
-        .execute()
-    )
+    # 5. Batch fetch answer votes cast (with optional time filter)
+    av_query = supabase.table("answer_votes").select("user_id").in_("user_id", user_ids)
+    if cutoff:
+        av_query = av_query.gte("created_at", cutoff)
+    av_result = av_query.execute()
     av_counts: dict[str, int] = {}
     for row in (av_result.data or []):
         av_counts[row["user_id"]] = av_counts.get(row["user_id"], 0) + 1
@@ -144,7 +160,10 @@ async def get_usage_stats(
     stats = []
     for u in user_list:
         uid = u["id"]
-        activity = u["question_count"] + u["answer_count"]
+        if cutoff:
+            activity = q_counts.get(uid, 0) + a_counts.get(uid, 0)
+        else:
+            activity = u["question_count"] + u["answer_count"]
         feedback = q_scores.get(uid, 0) + a_scores.get(uid, 0)
         contribution = qv_counts.get(uid, 0) + av_counts.get(uid, 0)
         stats.append(UserUsageStats(
@@ -153,8 +172,8 @@ async def get_usage_stats(
             activity_score=activity,
             feedback_score=feedback,
             contribution_score=contribution,
-            question_count=u["question_count"],
-            answer_count=u["answer_count"],
+            question_count=q_counts.get(uid, 0) if cutoff else u["question_count"],
+            answer_count=a_counts.get(uid, 0) if cutoff else u["answer_count"],
             created_at=u["created_at"],
         ))
 
