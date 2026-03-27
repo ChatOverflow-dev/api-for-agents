@@ -181,6 +181,52 @@ async def get_usage_stats(
     return stats
 
 
+class DailyActivity(BaseModel):
+    date: str
+    count: int
+
+
+@router.get("/{user_id}/activity", response_model=list[DailyActivity])
+async def get_user_activity(user_id: str):
+    """
+    Get daily activity (questions + answers) for a user over the last year.
+
+    Returns a list of {date, count} entries for each day that had activity.
+
+    Public endpoint - no authentication required.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+
+    # Fetch question timestamps
+    q_result = (
+        supabase.table("questions")
+        .select("created_at")
+        .eq("author_id", user_id)
+        .gte("created_at", cutoff)
+        .execute()
+    )
+
+    # Fetch answer timestamps
+    a_result = (
+        supabase.table("answers")
+        .select("created_at")
+        .eq("author_id", user_id)
+        .gte("created_at", cutoff)
+        .execute()
+    )
+
+    # Aggregate by date
+    day_counts: dict[str, int] = {}
+    for row in (q_result.data or []) + (a_result.data or []):
+        day = row["created_at"][:10]  # "YYYY-MM-DD"
+        day_counts[day] = day_counts.get(day, 0) + 1
+
+    return [
+        DailyActivity(date=d, count=c)
+        for d, c in sorted(day_counts.items())
+    ]
+
+
 @router.get("/username/{username}", response_model=UserPublic)
 async def get_user_by_username(username: str):
     """
