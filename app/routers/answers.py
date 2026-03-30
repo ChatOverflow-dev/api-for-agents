@@ -69,7 +69,13 @@ async def _create_answer_impl(
     if len(files) > MAX_FILES_PER_POST:
         raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_POST} files per answer")
 
-    question_result = supabase.table("questions").select("id").eq("id", question_id).execute()
+    question_result = (
+        supabase.table("questions")
+        .select("id")
+        .eq("id", question_id)
+        .eq("is_deleted", False)
+        .execute()
+    )
     if not question_result.data:
         raise HTTPException(status_code=404, detail="Question not found")
 
@@ -193,8 +199,8 @@ async def list_answers(
 
     Public endpoint - authentication optional.
     """
-    # Verify question exists
-    question_check = supabase.table("questions").select("id").eq("id", question_id).execute()
+    # Verify question exists and not deleted
+    question_check = supabase.table("questions").select("id").eq("id", question_id).eq("is_deleted", False).execute()
     if not question_check.data:
         raise HTTPException(status_code=404, detail="Question not found")
 
@@ -203,6 +209,7 @@ async def list_answers(
         supabase.table("answers")
         .select("id", count="exact")
         .eq("question_id", question_id)
+        .eq("is_deleted", False)
         .execute()
     )
     total = count_result.count or 0
@@ -221,6 +228,7 @@ async def list_answers(
         supabase.table("answers")
         .select("*, users!answers_author_id_fkey(username)")
         .eq("question_id", question_id)
+        .eq("is_deleted", False)
     )
 
     # Apply sorting (always with secondary sort by newest)
@@ -283,6 +291,7 @@ async def get_answer(
         supabase.table("answers")
         .select("*, users!answers_author_id_fkey(username)")
         .eq("id", answer_id)
+        .eq("is_deleted", False)
         .execute()
     )
 
@@ -332,6 +341,7 @@ async def vote_on_answer(
         supabase.table("answers")
         .select("*, users!answers_author_id_fkey(username)")
         .eq("id", answer_id)
+        .eq("is_deleted", False)
         .execute()
     )
     if not answer_result.data:
@@ -412,3 +422,51 @@ async def vote_on_answer(
     answer["score"] = new_score
 
     return _format_answer(answer, user_vote=requested_vote)
+
+
+@router.delete("/answers/{answer_id}", response_model=AnswerPublic)
+async def delete_answer(
+    answer_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Soft-delete an answer (sets is_deleted=true).
+
+    Decrements author's answer_count and question's answer_count.
+
+    Only the answer author can delete their own answer.
+    Requires authentication.
+    """
+    # Fetch the answer
+    result = (
+        supabase.table("answers")
+        .select("*, users!answers_author_id_fkey(username)")
+        .eq("id", answer_id)
+        .eq("is_deleted", False)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Answer not found")
+
+    answer = result.data[0]
+
+    # Verify author
+    if answer["author_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="You can only delete your own answers")
+
+    # Soft-delete the answer
+    supabase.table("answers").update({"is_deleted": True}).eq("id", answer_id).execute()
+
+    # Decrement question's answer_count
+    q_result = supabase.table("questions").select("answer_count").eq("id", answer["question_id"]).execute()
+    if q_result.data:
+        new_count = max(0, q_result.data[0]["answer_count"] - 1)
+        supabase.table("questions").update({"answer_count": new_count}).eq("id", answer["question_id"]).execute()
+
+    # Decrement author's answer_count
+    u_result = supabase.table("users").select("answer_count").eq("id", user["id"]).execute()
+    if u_result.data:
+        new_count = max(0, u_result.data[0]["answer_count"] - 1)
+        supabase.table("users").update({"answer_count": new_count}).eq("id", user["id"]).execute()
+
+    return _format_answer(answer)
