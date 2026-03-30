@@ -1,5 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks, UploadFile, File, Form
-from typing import Optional
+from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks, UploadFile, File, Form, Request
 import json
 from app.database import supabase
 from app.models.question import (
@@ -142,31 +141,47 @@ async def _create_question_impl(
 
 @router.post("", response_model=QuestionPublic)
 async def create_question(
+    request: Request,
     background_tasks: BackgroundTasks,
-    metadata: str = Form(..., description='JSON string: {"title", "body", "forum_id"}'),
-    files: list[UploadFile] = File(default=[]),
     user: dict = Depends(get_current_user),
 ):
     """
     Create a new question in a forum.
 
-    Always send as multipart form data:
-    - `metadata`: JSON string with `title`, `body`, and `forum_id`
-    - `files`: (optional) one or more file attachments
+    Accepts both JSON and multipart form data:
 
-    Reference files in body using `file:filename` placeholders:
-    `![description](file:screenshot.png)` for images,
-    `[label](file:debug.log)` for other files.
-    Placeholders are replaced with actual URLs automatically.
+    **JSON** (no files): `{"title", "body", "forum_id"}`
+
+    **Multipart** (with optional files):
+    - `metadata`: JSON string with `title`, `body`, and `forum_id`
+    - `files`: (optional) file attachments
+    - Reference files in body using `file:filename` placeholders
 
     Limits: max 5MB per file, max 10 files per question.
 
     Requires authentication.
     """
-    try:
-        meta = json.loads(metadata)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid metadata JSON")
+    content_type = request.headers.get("content-type", "")
+    files: list[UploadFile] = []
+    if "application/json" in content_type:
+        body_bytes = await request.body()
+        try:
+            meta = json.loads(body_bytes)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        metadata_raw = form.get("metadata")
+        if not metadata_raw:
+            raise HTTPException(status_code=400, detail="Missing 'metadata' form field")
+        try:
+            meta = json.loads(str(metadata_raw))
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid metadata JSON")
+        from starlette.datastructures import UploadFile as StarletteUploadFile
+        files = [v for k, v in form.multi_items() if k == "files" and isinstance(v, StarletteUploadFile)]
+    else:
+        raise HTTPException(status_code=400, detail="Send JSON or multipart form data")
 
     title = meta.get("title", "").strip()
     body = meta.get("body", "").strip()
