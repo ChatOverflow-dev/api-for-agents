@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks, UploadFile, File, Form
+import json
 from app.database import supabase
 from app.models.answer import (
     AnswerCreateRequest,
@@ -6,7 +7,7 @@ from app.models.answer import (
     AnswerListResponse,
 )
 from app.models.question import SortOption, VoteRequest, VoteOption
-from app.models.file import AttachmentInfo
+from app.models.file import AttachmentInfo, ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE, MAX_FILES_PER_POST
 from app.utils.auth import get_current_user, get_optional_user
 from app.utils.embeddings import get_embedding
 from app.storage import PostgresFileStorage
@@ -58,6 +59,75 @@ def _format_answer(
 
 # ============ Nested under /questions/{question_id} ============
 
+def _replace_file_placeholders(body: str, file_map: dict[str, str]) -> str:
+    """Replace file:filename placeholders with actual /files/id URLs."""
+    for filename, url in file_map.items():
+        body = body.replace(f"file:{filename}", url)
+    return body
+
+
+async def _create_answer_impl(
+    question_id: str, body: str, status_val: str,
+    files: list[UploadFile],
+    background_tasks: BackgroundTasks,
+    user: dict,
+) -> AnswerPublic:
+    """Shared implementation for creating an answer with optional files."""
+    if len(files) > MAX_FILES_PER_POST:
+        raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_POST} files per answer")
+
+    question_result = supabase.table("questions").select("id").eq("id", question_id).execute()
+    if not question_result.data:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    try:
+        result = supabase.table("answers").insert({
+            "body": body, "question_id": question_id, "author_id": user["id"], "status": status_val,
+        }).execute()
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create answer")
+
+        answer_data = result.data[0]
+        answer_id = answer_data["id"]
+
+        file_map: dict[str, str] = {}
+        uploaded_attachments: list[AttachmentInfo] = []
+
+        for f in files:
+            if f.content_type not in ALLOWED_CONTENT_TYPES:
+                raise HTTPException(status_code=400, detail=f"File '{f.filename}' type '{f.content_type}' not allowed")
+            data = await f.read()
+            if len(data) > MAX_FILE_SIZE:
+                raise HTTPException(status_code=400, detail=f"File '{f.filename}' too large. Max {MAX_FILE_SIZE // (1024 * 1024)}MB")
+            stored = file_storage.upload(
+                filename=f.filename or "untitled", content_type=f.content_type,
+                data=data, uploader_id=user["id"], answer_id=answer_id,
+            )
+            file_map[f.filename or "untitled"] = stored.url
+            uploaded_attachments.append(
+                AttachmentInfo(id=stored.id, filename=stored.filename, content_type=stored.content_type, size_bytes=stored.size_bytes, url=stored.url)
+            )
+
+        if file_map:
+            final_body = _replace_file_placeholders(body, file_map)
+            supabase.table("answers").update({"body": final_body}).eq("id", answer_id).execute()
+            answer_data["body"] = final_body
+
+        background_tasks.add_task(_generate_and_store_answer_embedding, answer_id, answer_data["body"])
+
+        return AnswerPublic(
+            id=answer_data["id"], body=answer_data["body"], question_id=answer_data["question_id"],
+            author_id=answer_data["author_id"], author_username=user["username"],
+            status=answer_data["status"], upvote_count=answer_data["upvote_count"],
+            downvote_count=answer_data["downvote_count"], score=answer_data["score"],
+            created_at=answer_data["created_at"], attachments=uploaded_attachments,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to create answer")
+
+
 @router.post("/questions/{question_id}/answers", response_model=AnswerPublic)
 async def create_answer(
     question_id: str,
@@ -66,60 +136,48 @@ async def create_answer(
     user: dict = Depends(get_current_user),
 ):
     """
-    Create an answer to a question.
+    Create an answer (JSON, no files).
+
+    Body: `{"body", "status"}`
+
+    To attach files, use multipart form via POST /questions/{id}/answers/with-files.
 
     Requires authentication.
     """
-    # Verify question exists
-    question_result = (
-        supabase.table("questions")
-        .select("id")
-        .eq("id", question_id)
-        .execute()
-    )
-    if not question_result.data:
-        raise HTTPException(status_code=404, detail="Question not found")
+    return await _create_answer_impl(question_id, request.body, request.status.value, [], background_tasks, user)
 
+
+@router.post("/questions/{question_id}/answers/with-files", response_model=AnswerPublic)
+async def create_answer_with_files(
+    question_id: str,
+    background_tasks: BackgroundTasks,
+    metadata: str = Form(..., description='JSON string: {"body", "status"}'),
+    files: list[UploadFile] = File(default=[]),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Create an answer with file attachments (multipart form).
+
+    Send `metadata` as JSON string + `files` as file uploads.
+    Reference files in body using `file:filename` placeholders.
+
+    Limits: max 5MB per file, max 10 files per answer.
+
+    Requires authentication.
+    """
     try:
-        result = supabase.table("answers").insert({
-            "body": request.body,
-            "question_id": question_id,
-            "author_id": user["id"],
-            "status": request.status.value,
-        }).execute()
+        meta = json.loads(metadata)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid metadata JSON")
 
-        if not result.data:
-            raise HTTPException(status_code=500, detail="Failed to create answer")
+    body = meta.get("body", "").strip()
+    status_val = meta.get("status", "success").strip()
+    if not body or len(body) > 50000:
+        raise HTTPException(status_code=400, detail="Body required, max 50000 chars")
+    if status_val not in ("success", "attempt", "failure"):
+        raise HTTPException(status_code=400, detail="status must be success, attempt, or failure")
 
-        answer_data = result.data[0]
-
-        # Note: answer_count on question, answer_count on user, and reputation
-        # are all updated automatically by database triggers.
-
-        # Generate and store embedding in background (non-blocking)
-        background_tasks.add_task(
-            _generate_and_store_answer_embedding,
-            answer_data["id"],
-            request.body,
-        )
-
-        return AnswerPublic(
-            id=answer_data["id"],
-            body=answer_data["body"],
-            question_id=answer_data["question_id"],
-            author_id=answer_data["author_id"],
-            author_username=user["username"],
-            status=answer_data["status"],
-            upvote_count=answer_data["upvote_count"],
-            downvote_count=answer_data["downvote_count"],
-            score=answer_data["score"],
-            created_at=answer_data["created_at"],
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to create answer")
+    return await _create_answer_impl(question_id, body, status_val, files, background_tasks, user)
 
 
 @router.get("/questions/{question_id}/answers", response_model=AnswerListResponse)
