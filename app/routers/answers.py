@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from app.database import supabase
 from app.models.answer import (
     AnswerCreateRequest,
@@ -6,16 +6,39 @@ from app.models.answer import (
     AnswerListResponse,
 )
 from app.models.question import SortOption, VoteRequest, VoteOption
+from app.models.file import AttachmentInfo
 from app.utils.auth import get_current_user, get_optional_user
 from app.utils.embeddings import get_embedding
+from app.storage import PostgresFileStorage
+import logging
 import math
+
+logger = logging.getLogger(__name__)
+
+file_storage = PostgresFileStorage()
 
 router = APIRouter(tags=["answers"])
 
 PAGE_SIZE = 20
 
 
-def _format_answer(answer: dict, user_vote: str | None = None) -> AnswerPublic:
+def _generate_and_store_answer_embedding(answer_id: str, text: str):
+    """Background task: generate embedding and update the answer row."""
+    try:
+        embedding = get_embedding(text)
+        if embedding is not None:
+            supabase.table("answers").update(
+                {"embedding": embedding}
+            ).eq("id", answer_id).execute()
+    except Exception:
+        logger.exception("Failed to generate embedding for answer %s", answer_id)
+
+
+def _format_answer(
+    answer: dict,
+    user_vote: str | None = None,
+    attachments: list[AttachmentInfo] | None = None,
+) -> AnswerPublic:
     """Helper to format answer data with joined fields."""
     return AnswerPublic(
         id=answer["id"],
@@ -29,6 +52,7 @@ def _format_answer(answer: dict, user_vote: str | None = None) -> AnswerPublic:
         score=answer["score"],
         created_at=answer["created_at"],
         user_vote=user_vote,
+        attachments=attachments or [],
     )
 
 
@@ -38,6 +62,7 @@ def _format_answer(answer: dict, user_vote: str | None = None) -> AnswerPublic:
 async def create_answer(
     question_id: str,
     request: AnswerCreateRequest,
+    background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
 ):
     """
@@ -71,12 +96,12 @@ async def create_answer(
         # Note: answer_count on question, answer_count on user, and reputation
         # are all updated automatically by database triggers.
 
-        # Generate and store embedding
-        embedding = get_embedding(request.body)
-        if embedding is not None:
-            supabase.table("answers").update(
-                {"embedding": embedding}
-            ).eq("id", answer_data["id"]).execute()
+        # Generate and store embedding in background (non-blocking)
+        background_tasks.add_task(
+            _generate_and_store_answer_embedding,
+            answer_data["id"],
+            request.body,
+        )
 
         return AnswerPublic(
             id=answer_data["id"],
@@ -166,8 +191,21 @@ async def list_answers(
         )
         user_votes = {v["answer_id"]: v["vote_type"] for v in votes_result.data}
 
+    # Batch-fetch attachments for all answers
+    answer_ids = [a["id"] for a in result.data]
+    attachments_by_answer = file_storage.list_for_answers(answer_ids)
+
+    def _answer_attachments(answer_id: str) -> list[AttachmentInfo]:
+        return [
+            AttachmentInfo(id=f.id, filename=f.filename, content_type=f.content_type, size_bytes=f.size_bytes, url=f.url)
+            for f in attachments_by_answer.get(answer_id, [])
+        ]
+
     return AnswerListResponse(
-        answers=[_format_answer(a, user_vote=user_votes.get(a["id"])) for a in result.data],
+        answers=[
+            _format_answer(a, user_vote=user_votes.get(a["id"]), attachments=_answer_attachments(a["id"]))
+            for a in result.data
+        ],
         page=page,
         total_pages=total_pages,
     )
@@ -210,7 +248,14 @@ async def get_answer(
         if vote_result.data:
             user_vote = vote_result.data[0]["vote_type"]
 
-    return _format_answer(result.data[0], user_vote=user_vote)
+    # Fetch attachments
+    stored_files = file_storage.list_for_answer(answer_id)
+    attachments = [
+        AttachmentInfo(id=f.id, filename=f.filename, content_type=f.content_type, size_bytes=f.size_bytes, url=f.url)
+        for f in stored_files
+    ]
+
+    return _format_answer(result.data[0], user_vote=user_vote, attachments=attachments)
 
 
 @router.post("/answers/{answer_id}/vote", response_model=AnswerPublic)

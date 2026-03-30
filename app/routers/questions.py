@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from app.database import supabase
 from app.models.question import (
     QuestionCreateRequest,
@@ -8,10 +8,17 @@ from app.models.question import (
     VoteRequest,
     VoteOption,
 )
+from app.models.file import AttachmentInfo
 from app.utils.auth import get_current_user, get_optional_user
 from app.utils.embeddings import get_embedding
+from app.storage import PostgresFileStorage
+import logging
 import math
 import re
+
+logger = logging.getLogger(__name__)
+
+file_storage = PostgresFileStorage()
 
 def _sanitize_search_word(word: str) -> str:
     """Strip characters significant in PostgREST filter syntax."""
@@ -23,7 +30,23 @@ router = APIRouter(prefix="/questions", tags=["questions"])
 PAGE_SIZE = 20
 
 
-def _format_question(question: dict, user_vote: str | None = None) -> QuestionPublic:
+def _generate_and_store_question_embedding(question_id: str, text: str):
+    """Background task: generate embedding and update the question row."""
+    try:
+        embedding = get_embedding(text)
+        if embedding is not None:
+            supabase.table("questions").update(
+                {"embedding": embedding}
+            ).eq("id", question_id).execute()
+    except Exception:
+        logger.exception("Failed to generate embedding for question %s", question_id)
+
+
+def _format_question(
+    question: dict,
+    user_vote: str | None = None,
+    attachments: list[AttachmentInfo] | None = None,
+) -> QuestionPublic:
     """Helper to format question data with joined fields."""
     return QuestionPublic(
         id=question["id"],
@@ -39,12 +62,14 @@ def _format_question(question: dict, user_vote: str | None = None) -> QuestionPu
         answer_count=question["answer_count"],
         created_at=question["created_at"],
         user_vote=user_vote,
+        attachments=attachments or [],
     )
 
 
 @router.post("", response_model=QuestionPublic)
 async def create_question(
     request: QuestionCreateRequest,
+    background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
 ):
     """
@@ -75,12 +100,12 @@ async def create_question(
         # Note: question_count on forum, question_count on user, and reputation
         # are all updated automatically by database triggers.
 
-        # Generate and store embedding
-        embedding = get_embedding(request.title + "\n\n" + request.body)
-        if embedding is not None:
-            supabase.table("questions").update(
-                {"embedding": embedding}
-            ).eq("id", question_data["id"]).execute()
+        # Generate and store embedding in background (non-blocking)
+        background_tasks.add_task(
+            _generate_and_store_question_embedding,
+            question_data["id"],
+            request.title + "\n\n" + request.body,
+        )
 
         return QuestionPublic(
             id=question_data["id"],
@@ -485,4 +510,11 @@ async def get_question(
         if vote_result.data:
             user_vote = vote_result.data[0]["vote_type"]
 
-    return _format_question(result.data[0], user_vote=user_vote)
+    # Fetch attachments
+    stored_files = file_storage.list_for_question(question_id)
+    attachments = [
+        AttachmentInfo(id=f.id, filename=f.filename, content_type=f.content_type, size_bytes=f.size_bytes, url=f.url)
+        for f in stored_files
+    ]
+
+    return _format_question(result.data[0], user_vote=user_vote, attachments=attachments)

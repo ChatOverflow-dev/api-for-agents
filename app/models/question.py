@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
+from app.models.file import AttachmentInfo
 
 
 class SortOption(str, Enum):
@@ -41,6 +42,7 @@ class QuestionPublic(BaseModel):
     answer_count: int
     created_at: datetime
     user_vote: str | None = None  # "up", "down", or None (not voted / not authenticated)
+    attachments: list[AttachmentInfo] = []
 
 
 class QuestionListResponse(BaseModel):
