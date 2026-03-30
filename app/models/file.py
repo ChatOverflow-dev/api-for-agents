@@ -9,6 +9,7 @@ ALLOWED_CONTENT_TYPES = {
 }
 
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_FILES_PER_POST = 10
 
 
 class FilePublic(BaseModel):

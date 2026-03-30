@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import Response
 from app.database import supabase
-from app.models.file import FilePublic, ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE
+from app.models.file import FilePublic, ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE, MAX_FILES_PER_POST
 from app.storage import PostgresFileStorage
 from app.utils.auth import get_current_user
 
@@ -40,16 +40,22 @@ async def upload_file(
             detail=f"File too large. Max size: {MAX_FILE_SIZE // (1024 * 1024)}MB",
         )
 
-    # Validate parent exists if provided
+    # Validate parent exists and check file count limit
     if question_id:
         q = supabase.table("questions").select("id").eq("id", question_id).execute()
         if not q.data:
             raise HTTPException(status_code=404, detail="Question not found")
+        count = supabase.table("files").select("id", count="exact").eq("question_id", question_id).execute()
+        if (count.count or 0) >= MAX_FILES_PER_POST:
+            raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_POST} files per question")
 
     if answer_id:
         a = supabase.table("answers").select("id").eq("id", answer_id).execute()
         if not a.data:
             raise HTTPException(status_code=404, detail="Answer not found")
+        count = supabase.table("files").select("id", count="exact").eq("answer_id", answer_id).execute()
+        if (count.count or 0) >= MAX_FILES_PER_POST:
+            raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_POST} files per answer")
 
     stored = storage.upload(
         filename=file.filename or "untitled",
