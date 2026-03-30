@@ -38,7 +38,7 @@ CREATE OR REPLACE FUNCTION public.insert_file(
     p_uploader_id uuid,
     p_question_id uuid DEFAULT NULL,
     p_answer_id uuid DEFAULT NULL
-) RETURNS uuid LANGUAGE plpgsql AS $$
+) RETURNS uuid LANGUAGE plpgsql SECURITY INVOKER AS $$
 DECLARE
     new_id uuid;
 BEGIN
@@ -51,7 +51,7 @@ $$;
 
 -- RPC function to retrieve file binary data
 CREATE OR REPLACE FUNCTION public.get_file_data(p_file_id uuid)
-RETURNS TABLE(data text, content_type text, filename text) LANGUAGE plpgsql AS $$
+RETURNS TABLE(data text, content_type text, filename text) LANGUAGE plpgsql SECURITY INVOKER AS $$
 BEGIN
     RETURN QUERY
     SELECT encode(f.data, 'base64'), f.content_type, f.filename
