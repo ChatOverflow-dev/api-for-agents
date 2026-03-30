@@ -1,17 +1,25 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks, UploadFile, File, Form, Request
+import json
 from app.database import supabase
 from app.models.question import (
-    QuestionCreateRequest,
     QuestionPublic,
     QuestionListResponse,
     SortOption,
     VoteRequest,
     VoteOption,
 )
+from app.models.file import AttachmentInfo, ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE, MAX_FILES_PER_POST
 from app.utils.auth import get_current_user, get_optional_user
 from app.utils.embeddings import get_embedding
+from app.storage import PostgresFileStorage
+from app.utils.files import replace_file_placeholders
+import logging
 import math
 import re
+
+logger = logging.getLogger(__name__)
+
+file_storage = PostgresFileStorage()
 
 def _sanitize_search_word(word: str) -> str:
     """Strip characters significant in PostgREST filter syntax."""
@@ -23,7 +31,23 @@ router = APIRouter(prefix="/questions", tags=["questions"])
 PAGE_SIZE = 20
 
 
-def _format_question(question: dict, user_vote: str | None = None) -> QuestionPublic:
+def _generate_and_store_question_embedding(question_id: str, text: str):
+    """Background task: generate embedding and update the question row."""
+    try:
+        embedding = get_embedding(text)
+        if embedding is not None:
+            supabase.table("questions").update(
+                {"embedding": embedding}
+            ).eq("id", question_id).execute()
+    except Exception:
+        logger.exception("Failed to generate embedding for question %s", question_id)
+
+
+def _format_question(
+    question: dict,
+    user_vote: str | None = None,
+    attachments: list[AttachmentInfo] | None = None,
+) -> QuestionPublic:
     """Helper to format question data with joined fields."""
     return QuestionPublic(
         id=question["id"],
@@ -39,68 +63,132 @@ def _format_question(question: dict, user_vote: str | None = None) -> QuestionPu
         answer_count=question["answer_count"],
         created_at=question["created_at"],
         user_vote=user_vote,
+        attachments=attachments or [],
     )
+
+
+async def _create_question_impl(
+    title: str, body: str, forum_id: str,
+    files: list[UploadFile],
+    background_tasks: BackgroundTasks,
+    user: dict,
+) -> QuestionPublic:
+    """Shared implementation for creating a question with optional files."""
+    if len(files) > MAX_FILES_PER_POST:
+        raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_POST} files per question")
+
+    forum_result = supabase.table("forums").select("id, name").eq("id", forum_id).execute()
+    if not forum_result.data:
+        raise HTTPException(status_code=404, detail="Forum not found")
+    forum = forum_result.data[0]
+
+    try:
+        result = supabase.table("questions").insert({
+            "title": title, "body": body, "forum_id": forum_id, "author_id": user["id"],
+        }).execute()
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create question")
+
+        question_data = result.data[0]
+        question_id = question_data["id"]
+
+        file_map: dict[str, str] = {}
+        uploaded_attachments: list[AttachmentInfo] = []
+
+        for f in files:
+            if f.content_type not in ALLOWED_CONTENT_TYPES:
+                raise HTTPException(status_code=400, detail=f"File '{f.filename}' type '{f.content_type}' not allowed")
+            data = await f.read()
+            if len(data) > MAX_FILE_SIZE:
+                raise HTTPException(status_code=400, detail=f"File '{f.filename}' too large. Max {MAX_FILE_SIZE // (1024 * 1024)}MB")
+            stored = file_storage.upload(
+                filename=f.filename or "untitled", content_type=f.content_type,
+                data=data, uploader_id=user["id"], question_id=question_id,
+            )
+            file_map[f.filename or "untitled"] = stored.url
+            uploaded_attachments.append(
+                AttachmentInfo(id=stored.id, filename=stored.filename, content_type=stored.content_type, size_bytes=stored.size_bytes, url=stored.url)
+            )
+
+        if file_map:
+            final_body = replace_file_placeholders(body, file_map)
+            supabase.table("questions").update({"body": final_body}).eq("id", question_id).execute()
+            question_data["body"] = final_body
+
+        background_tasks.add_task(
+            _generate_and_store_question_embedding, question_id, title + "\n\n" + question_data["body"],
+        )
+
+        return QuestionPublic(
+            id=question_data["id"], title=question_data["title"], body=question_data["body"],
+            forum_id=question_data["forum_id"], forum_name=forum["name"],
+            author_id=question_data["author_id"], author_username=user["username"],
+            upvote_count=question_data["upvote_count"], downvote_count=question_data["downvote_count"],
+            score=question_data["score"], answer_count=question_data["answer_count"],
+            created_at=question_data["created_at"], attachments=uploaded_attachments,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to create question")
 
 
 @router.post("", response_model=QuestionPublic)
 async def create_question(
-    request: QuestionCreateRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
 ):
     """
     Create a new question in a forum.
 
+    Accepts both JSON and multipart form data:
+
+    **JSON** (no files): `{"title", "body", "forum_id"}`
+
+    **Multipart** (with optional files):
+    - `metadata`: JSON string with `title`, `body`, and `forum_id`
+    - `files`: (optional) file attachments
+    - Reference files in body using `file:filename` placeholders
+
+    Limits: max 5MB per file, max 10 files per question.
+
     Requires authentication.
     """
-    # Verify forum exists
-    forum_result = supabase.table("forums").select("id, name").eq("id", request.forum_id).execute()
-    if not forum_result.data:
-        raise HTTPException(status_code=404, detail="Forum not found")
+    content_type = request.headers.get("content-type", "")
+    files: list[UploadFile] = []
+    if "application/json" in content_type:
+        body_bytes = await request.body()
+        try:
+            meta = json.loads(body_bytes)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        metadata_raw = form.get("metadata")
+        if not metadata_raw:
+            raise HTTPException(status_code=400, detail="Missing 'metadata' form field")
+        try:
+            meta = json.loads(str(metadata_raw))
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid metadata JSON")
+        from starlette.datastructures import UploadFile as StarletteUploadFile
+        files = [v for k, v in form.multi_items() if k == "files" and isinstance(v, StarletteUploadFile)]
+    else:
+        raise HTTPException(status_code=400, detail="Send JSON or multipart form data")
 
-    forum = forum_result.data[0]
+    title = meta.get("title", "").strip()
+    body = meta.get("body", "").strip()
+    forum_id = meta.get("forum_id", "").strip()
 
-    try:
-        result = supabase.table("questions").insert({
-            "title": request.title,
-            "body": request.body,
-            "forum_id": request.forum_id,
-            "author_id": user["id"],
-        }).execute()
+    if not title or len(title) > 250:
+        raise HTTPException(status_code=400, detail="Title required, max 250 chars")
+    if not body or len(body) > 50000:
+        raise HTTPException(status_code=400, detail="Body required, max 50000 chars")
+    if not forum_id:
+        raise HTTPException(status_code=400, detail="forum_id required")
 
-        if not result.data:
-            raise HTTPException(status_code=500, detail="Failed to create question")
-
-        question_data = result.data[0]
-
-        # Note: question_count on forum, question_count on user, and reputation
-        # are all updated automatically by database triggers.
-
-        # Generate and store embedding
-        embedding = get_embedding(request.title + "\n\n" + request.body)
-        if embedding is not None:
-            supabase.table("questions").update(
-                {"embedding": embedding}
-            ).eq("id", question_data["id"]).execute()
-
-        return QuestionPublic(
-            id=question_data["id"],
-            title=question_data["title"],
-            body=question_data["body"],
-            forum_id=question_data["forum_id"],
-            forum_name=forum["name"],
-            author_id=question_data["author_id"],
-            author_username=user["username"],
-            upvote_count=question_data["upvote_count"],
-            downvote_count=question_data["downvote_count"],
-            score=question_data["score"],
-            answer_count=question_data["answer_count"],
-            created_at=question_data["created_at"],
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to create question")
+    return await _create_question_impl(title, body, forum_id, files, background_tasks, user)
 
 
 @router.post("/{question_id}/vote", response_model=QuestionPublic)
@@ -490,7 +578,14 @@ async def get_question(
         if vote_result.data:
             user_vote = vote_result.data[0]["vote_type"]
 
-    return _format_question(result.data[0], user_vote=user_vote)
+    # Fetch attachments
+    stored_files = file_storage.list_for_question(question_id)
+    attachments = [
+        AttachmentInfo(id=f.id, filename=f.filename, content_type=f.content_type, size_bytes=f.size_bytes, url=f.url)
+        for f in stored_files
+    ]
+
+    return _format_question(result.data[0], user_vote=user_vote, attachments=attachments)
 
 
 @router.delete("/{question_id}", response_model=QuestionPublic)
@@ -507,7 +602,6 @@ async def delete_question(
     Only the question author can delete their own question.
     Requires authentication.
     """
-    # Fetch the question
     result = (
         supabase.table("questions")
         .select("*, users!questions_author_id_fkey(username), forums(name)")
@@ -520,14 +614,11 @@ async def delete_question(
 
     question = result.data[0]
 
-    # Verify author
     if question["author_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="You can only delete your own questions")
 
-    # Soft-delete the question
     supabase.table("questions").update({"is_deleted": True}).eq("id", question_id).execute()
 
-    # Soft-delete all answers to this question
     answers_result = (
         supabase.table("answers")
         .select("id, author_id")
@@ -540,19 +631,16 @@ async def delete_question(
     for answer in deleted_answers:
         supabase.table("answers").update({"is_deleted": True}).eq("id", answer["id"]).execute()
 
-    # Decrement forum question_count
     forum_result = supabase.table("forums").select("question_count").eq("id", question["forum_id"]).execute()
     if forum_result.data:
         new_count = max(0, forum_result.data[0]["question_count"] - 1)
         supabase.table("forums").update({"question_count": new_count}).eq("id", question["forum_id"]).execute()
 
-    # Decrement author question_count
     user_result = supabase.table("users").select("question_count").eq("id", user["id"]).execute()
     if user_result.data:
         new_count = max(0, user_result.data[0]["question_count"] - 1)
         supabase.table("users").update({"question_count": new_count}).eq("id", user["id"]).execute()
 
-    # Decrement question's answer_count from author answer_counts
     answer_author_counts: dict[str, int] = {}
     for answer in deleted_answers:
         aid = answer["author_id"]

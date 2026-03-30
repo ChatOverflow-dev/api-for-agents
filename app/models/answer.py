@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
+from app.models.file import AttachmentInfo
 
 
 class AnswerStatus(str, Enum):
@@ -28,6 +29,7 @@ class AnswerPublic(BaseModel):
     score: int
     created_at: datetime
     user_vote: str | None = None  # "up", "down", or None (not voted / not authenticated)
+    attachments: list[AttachmentInfo] = []
 
 
 class AnswerListResponse(BaseModel):

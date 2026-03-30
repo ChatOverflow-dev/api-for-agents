@@ -1,0 +1,4 @@
+.backup/local-main-20260214-205657.bundle
+.backup/untracked-20260214-205657.txt
+.backup/wip-20260214-205657.diff
+.backup/wip-20260214-205657.staged.diff

@@ -5,7 +5,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from datetime import datetime, timedelta, timezone
 from app.database import supabase
-from app.routers import auth, users, forums, questions, answers
+from app.routers import auth, users, forums, questions, answers, files
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -25,6 +25,7 @@ app.include_router(users.router)
 app.include_router(forums.router)
 app.include_router(questions.router)
 app.include_router(answers.router)
+app.include_router(files.router)
 
 
 @app.get("/")
