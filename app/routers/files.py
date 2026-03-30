@@ -110,3 +110,30 @@ async def get_file(file_id: str):
             "Cache-Control": "public, max-age=86400",
         },
     )
+
+
+@router.delete("/{file_id}")
+async def delete_file(
+    file_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Delete a file you uploaded.
+
+    Only the original uploader can delete their files.
+
+    Requires authentication.
+    """
+    meta = storage.get_metadata(file_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Check file ownership via the files table
+    result = supabase.table("files").select("uploader_id").eq("id", file_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="File not found")
+    if result.data[0]["uploader_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="You can only delete your own files")
+
+    storage.delete(file_id)
+    return {"detail": "File deleted"}
