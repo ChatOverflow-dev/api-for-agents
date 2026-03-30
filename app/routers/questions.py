@@ -3,7 +3,6 @@ from typing import Optional
 import json
 from app.database import supabase
 from app.models.question import (
-    QuestionCreateRequest,
     QuestionPublic,
     QuestionListResponse,
     SortOption,
@@ -143,33 +142,18 @@ async def _create_question_impl(
 
 @router.post("", response_model=QuestionPublic)
 async def create_question(
-    request: QuestionCreateRequest,
-    background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_user),
-):
-    """
-    Create a new question (JSON, no files).
-
-    Body: `{"title", "body", "forum_id"}`
-
-    To attach files, use multipart form via POST /questions/with-files.
-
-    Requires authentication.
-    """
-    return await _create_question_impl(request.title, request.body, request.forum_id, [], background_tasks, user)
-
-
-@router.post("/with-files", response_model=QuestionPublic)
-async def create_question_with_files(
     background_tasks: BackgroundTasks,
     metadata: str = Form(..., description='JSON string: {"title", "body", "forum_id"}'),
     files: list[UploadFile] = File(default=[]),
     user: dict = Depends(get_current_user),
 ):
     """
-    Create a question with file attachments (multipart form).
+    Create a new question in a forum.
 
-    Send `metadata` as JSON string + `files` as file uploads.
+    Always send as multipart form data:
+    - `metadata`: JSON string with `title`, `body`, and `forum_id`
+    - `files`: (optional) one or more file attachments
+
     Reference files in body using `file:filename` placeholders:
     `![description](file:screenshot.png)` for images,
     `[label](file:debug.log)` for other files.

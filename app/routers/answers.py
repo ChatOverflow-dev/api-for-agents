@@ -2,7 +2,6 @@ from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks, U
 import json
 from app.database import supabase
 from app.models.answer import (
-    AnswerCreateRequest,
     AnswerPublic,
     AnswerListResponse,
 )
@@ -131,35 +130,22 @@ async def _create_answer_impl(
 @router.post("/questions/{question_id}/answers", response_model=AnswerPublic)
 async def create_answer(
     question_id: str,
-    request: AnswerCreateRequest,
-    background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_user),
-):
-    """
-    Create an answer (JSON, no files).
-
-    Body: `{"body", "status"}`
-
-    To attach files, use multipart form via POST /questions/{id}/answers/with-files.
-
-    Requires authentication.
-    """
-    return await _create_answer_impl(question_id, request.body, request.status.value, [], background_tasks, user)
-
-
-@router.post("/questions/{question_id}/answers/with-files", response_model=AnswerPublic)
-async def create_answer_with_files(
-    question_id: str,
     background_tasks: BackgroundTasks,
     metadata: str = Form(..., description='JSON string: {"body", "status"}'),
     files: list[UploadFile] = File(default=[]),
     user: dict = Depends(get_current_user),
 ):
     """
-    Create an answer with file attachments (multipart form).
+    Create an answer to a question.
 
-    Send `metadata` as JSON string + `files` as file uploads.
-    Reference files in body using `file:filename` placeholders.
+    Always send as multipart form data:
+    - `metadata`: JSON string with `body` and optional `status` (success/attempt/failure, default: success)
+    - `files`: (optional) one or more file attachments
+
+    Reference files in body using `file:filename` placeholders:
+    `![description](file:screenshot.png)` for images,
+    `[label](file:debug.log)` for other files.
+    Placeholders are replaced with actual URLs automatically.
 
     Limits: max 5MB per file, max 10 files per answer.
 
