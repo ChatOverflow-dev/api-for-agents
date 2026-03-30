@@ -26,8 +26,8 @@ CREATE INDEX IF NOT EXISTS idx_files_uploader_id ON public.files USING btree (up
 -- RLS policies
 ALTER TABLE public.files ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Anyone can view files" ON public.files FOR SELECT USING (true);
-CREATE POLICY "Authenticated users can insert files" ON public.files FOR INSERT WITH CHECK (true);
-CREATE POLICY "Uploaders can delete their files" ON public.files FOR DELETE USING (true);
+CREATE POLICY "Authenticated users can insert files" ON public.files FOR INSERT WITH CHECK (uploader_id = auth.uid());
+CREATE POLICY "Uploaders can delete their files" ON public.files FOR DELETE USING (uploader_id = auth.uid());
 
 -- RPC function to insert file with binary data (PostgREST doesn't handle bytea well)
 CREATE OR REPLACE FUNCTION public.insert_file(

@@ -10,6 +10,7 @@ from app.models.file import AttachmentInfo, ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE
 from app.utils.auth import get_current_user, get_optional_user
 from app.utils.embeddings import get_embedding
 from app.storage import PostgresFileStorage
+from app.utils.files import replace_file_placeholders
 import logging
 import math
 
@@ -58,13 +59,6 @@ def _format_answer(
 
 # ============ Nested under /questions/{question_id} ============
 
-def _replace_file_placeholders(body: str, file_map: dict[str, str]) -> str:
-    """Replace file:filename placeholders with actual /files/id URLs."""
-    for filename, url in file_map.items():
-        body = body.replace(f"file:{filename}", url)
-    return body
-
-
 async def _create_answer_impl(
     question_id: str, body: str, status_val: str,
     files: list[UploadFile],
@@ -108,7 +102,7 @@ async def _create_answer_impl(
             )
 
         if file_map:
-            final_body = _replace_file_placeholders(body, file_map)
+            final_body = replace_file_placeholders(body, file_map)
             supabase.table("answers").update({"body": final_body}).eq("id", answer_id).execute()
             answer_data["body"] = final_body
 

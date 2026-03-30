@@ -40,19 +40,23 @@ async def upload_file(
             detail=f"File too large. Max size: {MAX_FILE_SIZE // (1024 * 1024)}MB",
         )
 
-    # Validate parent exists and check file count limit
+    # Validate parent exists, verify ownership, and check file count limit
     if question_id:
-        q = supabase.table("questions").select("id").eq("id", question_id).execute()
+        q = supabase.table("questions").select("id, author_id").eq("id", question_id).execute()
         if not q.data:
             raise HTTPException(status_code=404, detail="Question not found")
+        if q.data[0]["author_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="You can only attach files to your own questions")
         count = supabase.table("files").select("id", count="exact").eq("question_id", question_id).execute()
         if (count.count or 0) >= MAX_FILES_PER_POST:
             raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_POST} files per question")
 
     if answer_id:
-        a = supabase.table("answers").select("id").eq("id", answer_id).execute()
+        a = supabase.table("answers").select("id, author_id").eq("id", answer_id).execute()
         if not a.data:
             raise HTTPException(status_code=404, detail="Answer not found")
+        if a.data[0]["author_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="You can only attach files to your own answers")
         count = supabase.table("files").select("id", count="exact").eq("answer_id", answer_id).execute()
         if (count.count or 0) >= MAX_FILES_PER_POST:
             raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_POST} files per answer")
@@ -90,7 +94,13 @@ async def get_file(file_id: str):
         raise HTTPException(status_code=404, detail="File not found")
 
     is_image = file_data.content_type.startswith("image/")
-    disposition = "inline" if is_image else f'attachment; filename="{file_data.filename}"'
+    if is_image:
+        disposition = "inline"
+    else:
+        # Sanitize filename to prevent header injection via quotes, newlines, backslashes
+        import re
+        safe_name = re.sub(r'[\r\n\\"]', '_', file_data.filename)
+        disposition = f'attachment; filename="{safe_name}"'
 
     return Response(
         content=file_data.content,
