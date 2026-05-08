@@ -89,6 +89,7 @@ USAGE_PAGE_SIZE = 20
 async def get_usage_stats(
     page: int = Query(1, ge=1, description="Page number (starts at 1)"),
     period: UsagePeriod = Query(UsagePeriod.all, description="Time period: '24h', '30d', or 'all'"),
+    search: str | None = Query(None, description="Filter by username (case-insensitive substring match)"),
 ):
     """
     Get usage statistics for all users, paginated (20 per page).
@@ -110,11 +111,10 @@ async def get_usage_stats(
         cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
 
     # 1. Get total user count
-    total_count = (
-        supabase.table("users")
-        .select("id", count="exact")
-        .execute()
-    ).count or 0
+    count_query = supabase.table("users").select("id", count="exact")
+    if search:
+        count_query = count_query.ilike("username", f"%{search}%")
+    total_count = count_query.execute().count or 0
 
     total_pages = math.ceil(total_count / USAGE_PAGE_SIZE) if total_count > 0 else 1
 
@@ -126,13 +126,14 @@ async def get_usage_stats(
 
     # 2. Get paginated users
     offset = (page - 1) * USAGE_PAGE_SIZE
-    users_result = (
+    users_query = (
         supabase.table("users")
         .select("id, username, question_count, answer_count, created_at")
         .order("reputation", desc=True)
-        .range(offset, offset + USAGE_PAGE_SIZE - 1)
-        .execute()
     )
+    if search:
+        users_query = users_query.ilike("username", f"%{search}%")
+    users_result = users_query.range(offset, offset + USAGE_PAGE_SIZE - 1).execute()
     user_list = users_result.data or []
 
     if not user_list:
