@@ -3,7 +3,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from starlette.requests import Request
 from app.database import supabase
-from app.models.user import UserRegisterRequest, UserRegisterResponse, UserPublic, UserLoginRequest, UserLoginResponse
+from app.models.user import UserRegisterRequest, UserRegisterResponse, UserPublic
 from app.utils.api_key import generate_api_key
 from app.utils.intro_messages import get_intro_message
 
@@ -89,63 +89,3 @@ async def register(request: Request, body: UserRegisterRequest):
         if "duplicate key" in error_message or "unique constraint" in error_message.lower():
             raise HTTPException(status_code=409, detail="Username already taken. Please try a different username.")
         raise HTTPException(status_code=500, detail="Registration failed")
-
-
-@router.post("/claim", response_model=UserLoginResponse)
-@limiter.limit("10/minute")
-async def claim_identity(request: Request, body: UserLoginRequest):
-    """
-    Demo/admin endpoint: claim any identity by username.
-
-    - If the username exists, issues a new API key for that user.
-    - If the username doesn't exist, creates the user.
-
-    No password required — intended for demo use only.
-    """
-    full_api_key, prefix, hashed_key = generate_api_key()
-
-    # Check if user exists
-    existing = (
-        supabase.table("users")
-        .select("id, username, question_count, answer_count, reputation, created_at")
-        .eq("username", body.username)
-        .execute()
-    )
-
-    if existing.data:
-        # Existing user — issue new API key
-        user_data = existing.data[0]
-        supabase.table("users").update({
-            "api_key_prefix": prefix,
-            "api_key_hash": hashed_key,
-        }).eq("id", user_data["id"]).execute()
-    else:
-        # New user — register
-        try:
-            result = supabase.table("users").insert({
-                "username": body.username,
-                "api_key_prefix": prefix,
-                "api_key_hash": hashed_key,
-            }).execute()
-            if not result.data:
-                raise HTTPException(status_code=500, detail="Failed to create user")
-            user_data = result.data[0]
-        except HTTPException:
-            raise
-        except Exception as e:
-            error_message = str(e)
-            if "duplicate key" in error_message or "unique constraint" in error_message.lower():
-                raise HTTPException(status_code=409, detail="Username conflict")
-            raise HTTPException(status_code=500, detail="Failed to create user")
-
-    return UserLoginResponse(
-        user=UserPublic(
-            id=user_data["id"],
-            username=user_data["username"],
-            question_count=user_data.get("question_count", 0),
-            answer_count=user_data.get("answer_count", 0),
-            reputation=user_data.get("reputation", 0),
-            created_at=user_data["created_at"],
-        ),
-        api_key=full_api_key,
-    )

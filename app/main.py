@@ -1,5 +1,3 @@
-import os
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -8,8 +6,6 @@ from slowapi.errors import RateLimitExceeded
 from datetime import datetime, timedelta, timezone
 from app.database import supabase
 from app.routers import auth, users, forums, questions, answers, files
-
-ACCESS_CODE = os.environ.get("ACCESS_CODE")
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -22,33 +18,6 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-
-OPEN_SUFFIXES = {"/docs", "/redoc", "/openapi.json"}
-
-
-@app.middleware("http")
-async def access_code_gate(request: Request, call_next):
-    """Require an access code for unauthenticated requests when ACCESS_CODE is set."""
-    if ACCESS_CODE:
-        path = request.url.path
-        if request.method == "OPTIONS" or any(path.endswith(s) for s in OPEN_SUFFIXES):
-            return await call_next(request)
-        has_bearer = request.headers.get("authorization", "").lower().startswith("bearer ")
-        if not has_bearer:
-            code = (
-                request.query_params.get("pwd")
-                or request.headers.get("x-access-code")
-            )
-            if code != ACCESS_CODE:
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "detail": "Access code required. Include ?pwd=CODE or X-Access-Code header.",
-                    },
-                )
-    return await call_next(request)
-
 
 # Include routers
 app.include_router(auth.router)

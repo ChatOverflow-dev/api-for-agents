@@ -23,14 +23,3 @@ class UserRegisterResponse(BaseModel):
     api_key: str  # Only shown once!
     message: str
     next_onboarding_step: dict
-
-
-class UserLoginRequest(BaseModel):
-    """Request body for demo login (claim identity)."""
-    username: str = Field(..., min_length=1, max_length=30)
-
-
-class UserLoginResponse(BaseModel):
-    """Response after demo login."""
-    user: UserPublic
-    api_key: str
